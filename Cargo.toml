@@ -1,0 +1,39 @@
+[package]
+name = "ssherald"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+opt-level = "z"        # максимальная оптимизация по размеру
+lto = "fat"            # полный LTO — максимальное сжатие кода
+codegen-units = 1      # один codegen unit — лучше оптимизация
+panic = "abort"        # убирает раскрутку стека (~10% размера)
+strip = true           # удаляет debug-символы
+
+[dependencies]
+# SSH — чистый Rust (никакого OpenSSL / libssh2 / C-зависимостей)
+# ring вместо aws-lc-rs: не требует NASM/CMake при кросс-компиляции
+russh = { version = "0.57", default-features = false, features = ["flate2", "ring", "rsa"] }
+russh-sftp = "2.1"
+
+# GUI
+eframe = "0.29"
+egui = "0.29"
+egui_extras = { version = "0.29", features = ["all_loaders"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Сериализация
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Утилиты
+dirs = "5"
+parking_lot = "0.12"
+vte = "0.13"
+uuid = { version = "1", features = ["v4"] }
+log = "0.4"
+env_logger = "0.11"
+arboard = "3"
+rfd = "0.15"
