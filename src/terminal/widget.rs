@@ -41,6 +41,24 @@ impl Selection {
         }
         true
     }
+
+    fn selection_ranges(&self, max_cols: usize) -> Vec<(usize, usize, usize)> {
+        let ((sr, sc), (er, ec)) = self.normalized();
+        let mut ranges = Vec::new();
+        for row in sr..=er {
+            let (col_start, col_end) = if sr == er {
+                (sc, ec)
+            } else if row == sr {
+                (sc, max_cols.saturating_sub(1))
+            } else if row == er {
+                (0, ec)
+            } else {
+                (0, max_cols.saturating_sub(1))
+            };
+            ranges.push((row, col_start, col_end));
+        }
+        ranges
+    }
 }
 
 // --- Виджет терминала ---
@@ -78,7 +96,7 @@ impl TerminalWidget {
         }
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, ssh: &SshConnection) {
+    pub fn show(&mut self, ui: &mut egui::Ui, ssh: &SshConnection, interactive: bool) {
         self.process_ssh_output(ssh);
 
         let cell_size = self.calculate_cell_size(ui);
@@ -102,13 +120,33 @@ impl TerminalWidget {
             ui.allocate_painter(desired_size, egui::Sense::click_and_drag());
 
         let origin = response.rect.min;
-        let bg_color = egui::Color32::from_rgb(40, 42, 54);
-        let selection_bg = egui::Color32::from_rgba_premultiplied(100, 120, 220, 100);
+        let bg_color = egui::Color32::from_rgb(0x06, 0x06, 0x06);
+        let selection_bg = egui::Color32::from_rgb(0x00, 0x99, 0x28);
 
-        // Фон
         painter.rect_filled(response.rect, 0.0, bg_color);
 
-        // Рендер сетки терминала
+        // Selection rectangles (drawn before text for proper layering)
+        if let Some(sel) = &self.selection {
+            if !sel.is_empty() {
+                for (row, col_start, col_end) in sel.selection_ranges(new_cols) {
+                    if row >= new_rows {
+                        break;
+                    }
+                    let rect = egui::Rect::from_min_max(
+                        egui::pos2(
+                            origin.x + col_start as f32 * cell_size.x,
+                            origin.y + row as f32 * cell_size.y,
+                        ),
+                        egui::pos2(
+                            origin.x + (col_end + 1) as f32 * cell_size.x,
+                            origin.y + (row + 1) as f32 * cell_size.y,
+                        ),
+                    );
+                    painter.rect_filled(rect, 0.0, selection_bg);
+                }
+            }
+        }
+
         {
             let visible = self.emulator.visible_rows();
 
@@ -131,20 +169,18 @@ impl TerminalWidget {
                         cell.c.to_string()
                     };
 
+                    let is_selected = self
+                        .selection
+                        .as_ref()
+                        .map_or(false, |s| !s.is_empty() && s.contains(row_idx, col_idx));
+
                     let mut format = egui::TextFormat {
                         font_id: egui::FontId::monospace(self.font_size),
-                        color: fg,
+                        color: if is_selected { bg_color } else { fg },
                         ..Default::default()
                     };
 
-                    // Подсветка выделения
-                    if let Some(sel) = &self.selection {
-                        if !sel.is_empty() && sel.contains(row_idx, col_idx) {
-                            format.background = selection_bg;
-                        } else if cell_bg != bg_color {
-                            format.background = cell_bg;
-                        }
-                    } else if cell_bg != bg_color {
+                    if !is_selected && cell_bg != bg_color {
                         format.background = cell_bg;
                     }
 
@@ -167,7 +203,6 @@ impl TerminalWidget {
             }
 
         }
-        // -- grid borrow released --
 
         // Курсор — вычисляем X-позицию через LayoutJob (тот же подход, что и рендер),
         // чтобы позиция курсора точно совпадала с позицией символов.
@@ -213,27 +248,27 @@ impl TerminalWidget {
                 );
 
                 let time = ui.input(|i| i.time);
-                let blink = (time * 2.5) as i64 % 2 == 0;
+                let blink = (time * 2.0) as i64 % 2 == 0;
                 if blink {
                     painter.rect_filled(
                         cursor_rect,
                         0.0,
-                        egui::Color32::from_rgba_premultiplied(200, 200, 200, 180),
+                        egui::Color32::from_rgba_premultiplied(0x00, 0xff, 0x41, 0xcc),
                     );
                 }
             }
         }
 
-        // Обработка мыши (выделение)
-        self.handle_mouse(ui, &response, origin, cell_size, new_rows, new_cols);
+        if interactive {
+            self.handle_mouse(&response, origin, cell_size, new_rows, new_cols);
+        }
 
-        // Фокус по клику (без drag)
-        if response.clicked() && self.selection.is_none() {
+        if interactive && response.clicked() {
+            self.selection = None;
             self.focus = true;
         }
 
-        // Клавиатурный ввод
-        if self.focus {
+        if self.focus && interactive {
             self.handle_input(ui, ssh);
         }
 
@@ -245,7 +280,7 @@ impl TerminalWidget {
                 .map_or(false, |s| !s.is_empty());
 
             if ui
-                .add_enabled(has_sel, egui::Button::new("📋 Копировать  Ctrl+Shift+C"))
+                .add_enabled(has_sel, egui::Button::new("[copy]  C-S-c"))
                 .clicked()
             {
                 let text = self.get_selected_text();
@@ -255,7 +290,7 @@ impl TerminalWidget {
                 self.selection = None;
                 ui.close_menu();
             }
-            if ui.button("📋 Вставить  Ctrl+Shift+V").clicked() {
+            if ui.button("[paste] C-S-v").clicked() {
                 if let Ok(mut clipboard) = arboard::Clipboard::new() {
                     if let Ok(text) = clipboard.get_text() {
                         ssh.send(text.as_bytes());
@@ -286,17 +321,15 @@ impl TerminalWidget {
             let scrollbar_x = response.rect.right() - scrollbar_width - 2.0;
             let scrollbar_height = response.rect.height();
 
-            // Фон скроллбара
             painter.rect_filled(
                 egui::Rect::from_min_size(
                     egui::pos2(scrollbar_x, origin.y),
                     egui::vec2(scrollbar_width, scrollbar_height),
                 ),
-                3.0,
-                egui::Color32::from_rgba_premultiplied(50, 50, 70, 80),
+                0.0,
+                egui::Color32::from_rgba_premultiplied(0, 30, 0, 60),
             );
 
-            // Бегунок
             let total_lines = scrollback_len + new_rows;
             let visible_fraction = new_rows as f32 / total_lines as f32;
             let thumb_height = (scrollbar_height * visible_fraction).max(20.0);
@@ -310,32 +343,37 @@ impl TerminalWidget {
                     egui::pos2(scrollbar_x, thumb_y),
                     egui::vec2(scrollbar_width, thumb_height),
                 ),
-                3.0,
-                egui::Color32::from_rgba_premultiplied(140, 160, 220, 180),
+                0.0,
+                egui::Color32::from_rgba_premultiplied(0x00, 0xaa, 0x33, 0xbb),
             );
         }
 
         // Индикатор прокрутки
         if self.emulator.is_scrolled() {
-            let text = format!("↑ {} строк назад", self.emulator.scroll_offset());
+            let text = format!("-- {} lines up --", self.emulator.scroll_offset());
             let indicator_rect = egui::Rect::from_min_size(
                 egui::pos2(
-                    response.rect.center().x - 90.0,
-                    response.rect.bottom() - 30.0,
+                    response.rect.center().x - 100.0,
+                    response.rect.bottom() - 26.0,
                 ),
-                egui::vec2(180.0, 26.0),
+                egui::vec2(200.0, 22.0),
             );
             painter.rect_filled(
                 indicator_rect,
-                13.0,
-                egui::Color32::from_rgba_premultiplied(60, 70, 110, 220),
+                0.0,
+                egui::Color32::from_rgba_premultiplied(0, 20, 0, 220),
+            );
+            painter.rect_stroke(
+                indicator_rect,
+                0.0,
+                egui::Stroke::new(1.0, crate::theme::GREEN_DARK),
             );
             painter.text(
                 indicator_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 &text,
-                egui::FontId::proportional(12.0),
-                egui::Color32::from_rgb(200, 210, 255),
+                egui::FontId::monospace(11.0),
+                crate::theme::GREEN_DIM,
             );
         }
     }
@@ -358,35 +396,26 @@ impl TerminalWidget {
         egui::vec2(char_width.max(1.0), line_height.max(1.0))
     }
 
-    // --- Мышь: выделение ---
     fn handle_mouse(
         &mut self,
-        ui: &egui::Ui,
         response: &egui::Response,
         origin: egui::Pos2,
         cell_size: egui::Vec2,
         max_rows: usize,
         max_cols: usize,
     ) {
-        let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
-        let primary_down = ui.input(|i| i.pointer.primary_down());
-
-        // Начало выделения
-        if primary_pressed {
-            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-                if response.rect.contains(pos) {
-                    let (row, col) = pos_to_cell(pos, origin, cell_size, max_rows, max_cols);
-                    self.selection_anchor = Some((row, col));
-                    self.selection = None;
-                    self.selecting = true;
-                    self.focus = true;
-                }
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let (row, col) = pos_to_cell(pos, origin, cell_size, max_rows, max_cols);
+                self.selection_anchor = Some((row, col));
+                self.selection = None;
+                self.selecting = true;
+                self.focus = true;
             }
         }
 
-        // Обновление выделения при drag
-        if self.selecting && primary_down {
-            if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
+        if self.selecting && response.dragged_by(egui::PointerButton::Primary) {
+            if let Some(pos) = response.interact_pointer_pos() {
                 let (row, col) = pos_to_cell(pos, origin, cell_size, max_rows, max_cols);
                 if let Some((ar, ac)) = self.selection_anchor {
                     if ar != row || ac != col {
@@ -401,8 +430,7 @@ impl TerminalWidget {
             }
         }
 
-        // Конец выделения
-        if self.selecting && !primary_down {
+        if self.selecting && response.drag_stopped() {
             self.selecting = false;
         }
     }
@@ -691,9 +719,9 @@ fn term_color_to_egui(color: TermColor, is_fg: bool, is_bold: bool) -> egui::Col
     match color {
         TermColor::Default => {
             if is_fg {
-                egui::Color32::from_rgb(248, 248, 242)
+                egui::Color32::from_rgb(0x00, 0xff, 0x41) // phosphor green
             } else {
-                egui::Color32::from_rgb(40, 42, 54)
+                egui::Color32::from_rgb(0x06, 0x06, 0x06) // near-black
             }
         }
         TermColor::Indexed(idx) => {
@@ -719,25 +747,25 @@ fn pos_to_cell(
     )
 }
 
-/// Цветовая палитра Dracula (16 базовых + 256 расширенных)
+/// CRT hacker palette (16 base + 256 extended)
 fn indexed_color(idx: u8) -> egui::Color32 {
     match idx {
-        0 => egui::Color32::from_rgb(40, 42, 54),
-        1 => egui::Color32::from_rgb(255, 85, 85),
-        2 => egui::Color32::from_rgb(80, 250, 123),
-        3 => egui::Color32::from_rgb(241, 250, 140),
-        4 => egui::Color32::from_rgb(189, 147, 249),
-        5 => egui::Color32::from_rgb(255, 121, 198),
-        6 => egui::Color32::from_rgb(139, 233, 253),
-        7 => egui::Color32::from_rgb(248, 248, 242),
-        8 => egui::Color32::from_rgb(98, 114, 164),
-        9 => egui::Color32::from_rgb(255, 110, 110),
-        10 => egui::Color32::from_rgb(105, 255, 148),
-        11 => egui::Color32::from_rgb(255, 255, 165),
-        12 => egui::Color32::from_rgb(214, 172, 255),
-        13 => egui::Color32::from_rgb(255, 146, 223),
-        14 => egui::Color32::from_rgb(164, 255, 255),
-        15 => egui::Color32::from_rgb(255, 255, 255),
+        0  => egui::Color32::from_rgb(0x08, 0x08, 0x08), // black
+        1  => egui::Color32::from_rgb(0xcc, 0x33, 0x33), // red
+        2  => egui::Color32::from_rgb(0x00, 0xcc, 0x33), // green
+        3  => egui::Color32::from_rgb(0xcc, 0xaa, 0x00), // yellow/amber
+        4  => egui::Color32::from_rgb(0x33, 0x88, 0xcc), // blue
+        5  => egui::Color32::from_rgb(0x88, 0x44, 0xcc), // magenta
+        6  => egui::Color32::from_rgb(0x00, 0xaa, 0x88), // cyan
+        7  => egui::Color32::from_rgb(0xaa, 0xbb, 0xaa), // white (dim)
+        8  => egui::Color32::from_rgb(0x44, 0x55, 0x44), // bright black (grey)
+        9  => egui::Color32::from_rgb(0xff, 0x44, 0x44), // bright red
+        10 => egui::Color32::from_rgb(0x00, 0xff, 0x41), // bright green (phosphor)
+        11 => egui::Color32::from_rgb(0xff, 0xcc, 0x00), // bright yellow
+        12 => egui::Color32::from_rgb(0x44, 0xaa, 0xff), // bright blue
+        13 => egui::Color32::from_rgb(0xbb, 0x66, 0xff), // bright magenta
+        14 => egui::Color32::from_rgb(0x00, 0xdd, 0xbb), // bright cyan
+        15 => egui::Color32::from_rgb(0xcc, 0xee, 0xcc), // bright white
         16..=231 => {
             let n = idx - 16;
             let r_comp = n / 36;

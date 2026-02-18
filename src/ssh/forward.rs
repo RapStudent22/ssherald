@@ -153,7 +153,7 @@ impl PortForwarder {
 
         // Панель инструментов
         ui.horizontal(|ui| {
-            if ui.button("➕ Добавить правило").clicked() {
+            if ui.button("[+ add rule]").clicked() {
                 self.show_add_dialog = true;
                 self.new_forward_type = 0;
                 self.new_local_host = "127.0.0.1".to_string();
@@ -165,12 +165,12 @@ impl PortForwarder {
 
         // Статус / ошибки
         if let Some(msg) = self.status_message.take() {
-            ui.colored_label(egui::Color32::from_rgb(80, 250, 123), &msg);
+            ui.colored_label(crate::theme::GREEN, &msg);
         }
         for err in &self.error_messages {
             ui.colored_label(
-                egui::Color32::from_rgb(255, 85, 85),
-                format!("Ошибка: {}", err),
+                crate::theme::RED,
+                format!("ERR: {}", err),
             );
         }
 
@@ -179,12 +179,9 @@ impl PortForwarder {
         if self.forwards.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(ui.available_height() / 3.0);
-                ui.label("Нет активных правил перенаправления портов");
+                ui.colored_label(crate::theme::GREEN_DIM, "// no active port forwards");
                 ui.add_space(8.0);
-                ui.colored_label(
-                    egui::Color32::from_rgb(98, 114, 164),
-                    "Нажмите «Добавить правило» для создания",
-                );
+                ui.colored_label(crate::theme::GREY, "// click [+ add rule] to create one");
             });
         } else {
             // Таблица активных форвардов
@@ -201,11 +198,11 @@ impl PortForwarder {
                 .column(egui_extras::Column::auto().at_least(50.0))
                 .column(egui_extras::Column::auto().at_least(40.0))
                 .header(24.0, |mut header| {
-                    header.col(|ui| { ui.strong("Тип"); });
-                    header.col(|ui| { ui.strong("Локальный"); });
+                    header.col(|ui| { ui.strong("TYPE"); });
+                    header.col(|ui| { ui.strong("LOCAL"); });
                     header.col(|ui| { ui.strong(""); });
-                    header.col(|ui| { ui.strong("Удалённый"); });
-                    header.col(|ui| { ui.strong("Конн."); });
+                    header.col(|ui| { ui.strong("REMOTE"); });
+                    header.col(|ui| { ui.strong("#"); });
                     header.col(|ui| { ui.strong(""); });
                 })
                 .body(|body| {
@@ -217,13 +214,13 @@ impl PortForwarder {
                         row.col(|ui| {
                             let (label, color) = match fwd.rule.forward_type {
                                 ForwardType::Local => {
-                                    ("Local", egui::Color32::from_rgb(139, 233, 253))
+                                    ("-L", crate::theme::GREEN)
                                 }
                                 ForwardType::Remote => {
-                                    ("Remote", egui::Color32::from_rgb(255, 121, 198))
+                                    ("-R", crate::theme::AMBER)
                                 }
                                 ForwardType::Dynamic => {
-                                    ("SOCKS5", egui::Color32::from_rgb(241, 250, 140))
+                                    ("-D", crate::theme::CYAN)
                                 }
                             };
                             ui.colored_label(color, label);
@@ -236,17 +233,17 @@ impl PortForwarder {
                         });
                         row.col(|ui| {
                             let arrow = match fwd.rule.forward_type {
-                                ForwardType::Local => "→",
-                                ForwardType::Remote => "←",
-                                ForwardType::Dynamic => "⇄",
+                                ForwardType::Local => "->",
+                                ForwardType::Remote => "<-",
+                                ForwardType::Dynamic => "<>",
                             };
                             ui.label(arrow);
                         });
                         row.col(|ui| {
                             if fwd.rule.forward_type == ForwardType::Dynamic {
                                 ui.colored_label(
-                                    egui::Color32::from_rgb(98, 114, 164),
-                                    "dynamic",
+                                    crate::theme::GREY,
+                                    "*",
                                 );
                             } else {
                                 ui.monospace(format!(
@@ -261,8 +258,8 @@ impl PortForwarder {
                         });
                         row.col(|ui| {
                             if ui
-                                .button("⏹")
-                                .on_hover_text("Остановить")
+                                .button("[x]")
+                                .on_hover_text("stop")
                                 .clicked()
                             {
                                 stop_idx = Some(idx);
@@ -273,7 +270,7 @@ impl PortForwarder {
 
             if let Some(idx) = stop_idx {
                 self.stop_forward(idx);
-                self.status_message = Some("Перенаправление остановлено".to_string());
+                self.status_message = Some("forward stopped".to_string());
             }
         }
 
@@ -286,7 +283,7 @@ impl PortForwarder {
     fn render_add_dialog(&mut self, ui: &mut egui::Ui) {
         let mut do_add = false;
 
-        egui::Window::new("Новое перенаправление порта")
+        egui::Window::new("add port forward")
             .collapsible(false)
             .resizable(false)
             .default_width(400.0)
@@ -295,22 +292,22 @@ impl PortForwarder {
                     .num_columns(2)
                     .spacing([10.0, 8.0])
                     .show(ui, |ui| {
-                        ui.label("Тип:");
+                        ui.label("type:");
                         ui.horizontal(|ui| {
-                            ui.radio_value(&mut self.new_forward_type, 0, "Local (-L)");
-                            ui.radio_value(&mut self.new_forward_type, 1, "Remote (-R)");
-                            ui.radio_value(&mut self.new_forward_type, 2, "SOCKS5 (-D)");
+                            ui.radio_value(&mut self.new_forward_type, 0, "-L local");
+                            ui.radio_value(&mut self.new_forward_type, 1, "-R remote");
+                            ui.radio_value(&mut self.new_forward_type, 2, "-D socks5");
                         });
                         ui.end_row();
 
-                        ui.label("Локальный хост:");
+                        ui.label("bind host:");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.new_local_host)
                                 .hint_text("127.0.0.1"),
                         );
                         ui.end_row();
 
-                        ui.label("Локальный порт:");
+                        ui.label("bind port:");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.new_local_port)
                                 .hint_text(if self.new_forward_type == 2 {
@@ -322,14 +319,14 @@ impl PortForwarder {
                         ui.end_row();
 
                         if self.new_forward_type != 2 {
-                            ui.label("Удалённый хост:");
+                            ui.label("dest host:");
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.new_remote_host)
                                     .hint_text("localhost"),
                             );
                             ui.end_row();
 
-                            ui.label("Удалённый порт:");
+                            ui.label("dest port:");
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.new_remote_port)
                                     .hint_text("5432"),
@@ -354,11 +351,11 @@ impl PortForwarder {
                 );
 
                 let description = match self.new_forward_type {
-                    0 => format!("{}  →  SSH  →  {}", local_str, remote_str),
-                    1 => format!("{}  ←  SSH  ←  {}", local_str, remote_str),
-                    _ => format!("SOCKS5 прокси на {}", local_str),
+                    0 => format!("{} -> ssh -> {}", local_str, remote_str),
+                    1 => format!("{} <- ssh <- {}", local_str, remote_str),
+                    _ => format!("socks5 proxy on {}", local_str),
                 };
-                ui.colored_label(egui::Color32::from_rgb(139, 233, 253), &description);
+                ui.colored_label(crate::theme::GREEN_DIM, &description);
 
                 ui.add_space(4.0);
 
@@ -375,12 +372,12 @@ impl PortForwarder {
                     };
 
                     if ui
-                        .add_enabled(can_add, egui::Button::new("▶ Запустить"))
+                        .add_enabled(can_add, egui::Button::new("[start]"))
                         .clicked()
                     {
                         do_add = true;
                     }
-                    if ui.button("Отмена").clicked() {
+                    if ui.button("[cancel]").clicked() {
                         self.show_add_dialog = false;
                     }
                 });
@@ -401,7 +398,7 @@ impl PortForwarder {
             };
             self.start_forward(rule);
             self.show_add_dialog = false;
-            self.status_message = Some("Перенаправление запущено".to_string());
+            self.status_message = Some("forward started".to_string());
         }
     }
 }

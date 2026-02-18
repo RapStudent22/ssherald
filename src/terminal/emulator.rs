@@ -65,7 +65,7 @@ pub struct TerminalEmulator {
     auto_wrap: bool,
     wrap_next: bool,
     tab_stops: Vec<bool>,
-    // Буфер для батчинга ввода (16мс буферизация)
+    #[allow(dead_code)]
     pending_data: Vec<u8>,
 }
 
@@ -101,12 +101,12 @@ impl TerminalEmulator {
         }
     }
 
-    /// Добавить данные в буфер (для батчинга)
+    #[allow(dead_code)]
     pub fn feed(&mut self, data: &[u8]) {
         self.pending_data.extend_from_slice(data);
     }
 
-    /// Обработать все накопленные данные
+    #[allow(dead_code)]
     pub fn flush(&mut self) {
         let data = std::mem::take(&mut self.pending_data);
         // Извлекаем парсер, чтобы избежать двойного &mut self
@@ -135,10 +135,12 @@ impl TerminalEmulator {
         (self.cursor_row, self.cursor_col, self.cursor_visible)
     }
 
+    #[allow(dead_code)]
     pub fn cols(&self) -> usize {
         self.cols
     }
 
+    #[allow(dead_code)]
     pub fn rows(&self) -> usize {
         self.rows
     }

@@ -10,13 +10,11 @@ pub struct AppState {
     sessions: Vec<SessionConfig>,
     active_session_id: Option<String>,
     connections: HashMap<String, Connection>,
-    // Диалог создания/редактирования сессии
     show_session_dialog: bool,
     dialog: SessionDialog,
-    // Диалог ввода пароля при подключении
+    dialog_focus_needed: bool,
     show_connect_dialog: bool,
     connect_dialog: ConnectDialog,
-    // Последняя ошибка (отображается после авто-отключения)
     last_error: Option<String>,
 }
 
@@ -92,7 +90,7 @@ impl Default for ConnectDialog {
 
 impl AppState {
     pub fn new(cc: &eframe::CreationContext) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        crate::theme::apply(&cc.egui_ctx);
         let sessions = config::load_sessions();
 
         AppState {
@@ -101,6 +99,7 @@ impl AppState {
             connections: HashMap::new(),
             show_session_dialog: false,
             dialog: SessionDialog::default(),
+            dialog_focus_needed: false,
             show_connect_dialog: false,
             connect_dialog: ConnectDialog::default(),
             last_error: None,
@@ -150,6 +149,7 @@ impl AppState {
                     password: String::new(),
                 };
                 self.show_connect_dialog = true;
+                self.dialog_focus_needed = true;
                 self.active_session_id = Some(session.id.clone());
             }
             AuthType::KeyFile(_) | AuthType::Agent => {
@@ -211,7 +211,11 @@ impl AppState {
             .show(ctx, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.heading("SSHerald");
+                    ui.label(
+                        egui::RichText::new("[ SSHerald ]")
+                            .color(crate::theme::GREEN_BRIGHT)
+                            .strong(),
+                    );
                 });
                 ui.separator();
 
@@ -232,61 +236,56 @@ impl AppState {
                             egui::Sense::click(),
                         );
 
-                        // Фон: подсветка активной / наведённой строки
-                        let accent = egui::Color32::from_rgb(98, 114, 164);
                         if is_active {
-                            // Заметный фон для активной сессии
                             ui.painter().rect_filled(
                                 rect,
-                                4.0,
-                                ui.visuals().selection.bg_fill,
+                                0.0,
+                                crate::theme::BG_ACTIVE,
                             );
-                            // Акцентная полоска слева
                             let bar = egui::Rect::from_min_max(
                                 rect.min,
-                                egui::pos2(rect.min.x + 3.0, rect.max.y),
+                                egui::pos2(rect.min.x + 2.0, rect.max.y),
                             );
-                            ui.painter().rect_filled(bar, 2.0, accent);
+                            ui.painter().rect_filled(bar, 0.0, crate::theme::GREEN);
                         } else if button.hovered() {
                             ui.painter().rect_filled(
                                 rect,
-                                4.0,
-                                ui.visuals().widgets.hovered.bg_fill,
+                                0.0,
+                                crate::theme::BG_HOVER,
                             );
                         }
 
-                        // Название сессии — слева (с отступом от полоски)
-                        let text_left = if is_active { rect.min.x + 10.0 } else { rect.min.x + 8.0 };
+                        let text_left = rect.min.x + 8.0;
                         let text_color = if is_active {
-                            egui::Color32::WHITE
+                            crate::theme::GREEN_BRIGHT
                         } else {
-                            ui.visuals().text_color()
+                            crate::theme::GREEN_DIM
                         };
-                        let font = if is_active {
-                            egui::FontId::proportional(14.0)
-                        } else {
-                            egui::FontId::proportional(13.5)
-                        };
+                        let font = egui::FontId::monospace(13.0);
+
+                        // Status prefix
+                        let prefix = if is_connected { "> " } else { "  " };
                         ui.painter().text(
                             egui::pos2(text_left, rect.center().y),
                             egui::Align2::LEFT_CENTER,
-                            &session.name,
+                            &format!("{}{}", prefix, session.name),
                             font,
                             text_color,
                         );
 
-                        // Индикатор статуса — справа
-                        let dot_radius = 4.0;
-                        let dot_center = egui::pos2(
-                            rect.max.x - 12.0,
-                            rect.center().y,
-                        );
-                        let dot_color = if is_connected {
-                            egui::Color32::from_rgb(80, 250, 123)
+                        // Status indicator text
+                        let (status_text, status_color) = if is_connected {
+                            ("ON", crate::theme::GREEN)
                         } else {
-                            egui::Color32::from_rgb(255, 85, 85)
+                            ("--", crate::theme::GREY)
                         };
-                        ui.painter().circle_filled(dot_center, dot_radius, dot_color);
+                        ui.painter().text(
+                            egui::pos2(rect.max.x - 8.0, rect.center().y),
+                            egui::Align2::RIGHT_CENTER,
+                            status_text,
+                            egui::FontId::monospace(10.0),
+                            status_color,
+                        );
 
                         if button.clicked() {
                             if is_connected {
@@ -298,22 +297,22 @@ impl AppState {
 
                         button.context_menu(|ui| {
                             if !is_connected {
-                                if ui.button("🔌 Подключить").clicked() {
+                                if ui.button("[connect]").clicked() {
                                     connect_id = Some(session.id.clone());
                                     ui.close_menu();
                                 }
                             } else {
-                                if ui.button("❌ Отключить").clicked() {
+                                if ui.button("[disconnect]").clicked() {
                                     disconnect_id = Some(session.id.clone());
                                     ui.close_menu();
                                 }
                             }
-                            if ui.button("✏ Редактировать").clicked() {
+                            if ui.button("[edit]").clicked() {
                                 edit_session = Some(session.clone());
                                 ui.close_menu();
                             }
                             ui.separator();
-                            if ui.button("🗑 Удалить").clicked() {
+                            if ui.button("[delete]").clicked() {
                                 delete_id = Some(session.id.clone());
                                 if is_connected {
                                     disconnect_id = Some(session.id.clone());
@@ -365,12 +364,14 @@ impl AppState {
                             .unwrap_or_default(),
                     };
                     self.show_session_dialog = true;
+                    self.dialog_focus_needed = true;
                 }
 
                 ui.separator();
-                if ui.button("➕ Новая сессия").clicked() {
+                if ui.button("[+ new session]").clicked() {
                     self.dialog = SessionDialog::default();
                     self.show_session_dialog = true;
+                    self.dialog_focus_needed = true;
                 }
             });
     }
@@ -378,12 +379,16 @@ impl AppState {
     // ── Центральная панель ──
 
     fn render_central_panel(&mut self, ctx: &egui::Context) {
+        let any_dialog = self.show_session_dialog || self.show_connect_dialog;
         egui::CentralPanel::default().show(ctx, |ui| {
             let active_id = match self.active_session_id.clone() {
                 Some(id) => id,
                 None => {
                     ui.centered_and_justified(|ui| {
-                        ui.label("Выберите или создайте сессию слева");
+                        ui.colored_label(
+                            crate::theme::GREEN_DIM,
+                            "// select or create a session",
+                        );
                     });
                     return;
                 }
@@ -397,14 +402,14 @@ impl AppState {
                         ui.add_space(ui.available_height() / 3.0);
                         if let Some(err) = &self.last_error {
                             for line in err.lines() {
-                                ui.colored_label(
-                                    egui::Color32::from_rgb(255, 85, 85),
-                                    line,
-                                );
+                                ui.colored_label(crate::theme::RED, line);
                             }
                             ui.add_space(8.0);
                         }
-                        ui.label("Сессия не подключена. Нажмите на неё для повторного подключения.");
+                        ui.colored_label(
+                            crate::theme::GREEN_DIM,
+                            "Session disconnected. Click to reconnect.",
+                        );
                     });
                     return;
                 }
@@ -417,31 +422,29 @@ impl AppState {
 
             if let Some(err) = &conn.error {
                 ui.colored_label(
-                    egui::Color32::from_rgb(255, 85, 85),
-                    format!("Ошибка: {}", err),
+                    crate::theme::RED,
+                    format!("ERR: {}", err),
                 );
             }
 
-            // Панель вкладок + статус подключения
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut conn.active_tab, Tab::Shell, "🖥 Shell");
-                ui.selectable_value(&mut conn.active_tab, Tab::Sftp, "📁 SFTP");
-                ui.selectable_value(&mut conn.active_tab, Tab::Forward, "🔀 Port Forward");
+                ui.selectable_value(&mut conn.active_tab, Tab::Shell, "[SHELL]");
+                ui.selectable_value(&mut conn.active_tab, Tab::Sftp, "[SFTP]");
+                ui.selectable_value(&mut conn.active_tab, Tab::Forward, "[FWD]");
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if conn.ssh.is_alive() {
-                        ui.colored_label(egui::Color32::from_rgb(80, 250, 123), "● Подключено");
+                        ui.colored_label(crate::theme::GREEN, "[ONLINE]");
                     } else {
-                        ui.colored_label(egui::Color32::from_rgb(255, 85, 85), "● Отключено");
+                        ui.colored_label(crate::theme::RED, "[OFFLINE]");
                     }
                 });
             });
             ui.separator();
 
-            // Содержимое вкладки
             match conn.active_tab {
                 Tab::Shell => {
-                    conn.terminal.show(ui, &conn.ssh);
+                    conn.terminal.show(ui, &conn.ssh, !any_dialog);
                 }
                 Tab::Sftp => {
                     if conn.sftp.is_none() {
@@ -449,8 +452,8 @@ impl AppState {
                             Ok(browser) => conn.sftp = Some(browser),
                             Err(e) => {
                                 ui.colored_label(
-                                    egui::Color32::from_rgb(255, 85, 85),
-                                    format!("Ошибка SFTP: {}", e),
+                                    crate::theme::RED,
+                                    format!("SFTP ERR: {}", e),
                                 );
                             }
                         }
@@ -500,7 +503,7 @@ impl AppState {
         let mut open = true;
         let mut do_connect = false;
 
-        egui::Window::new(format!("🔌 {}", display_name))
+        egui::Window::new(format!("connect: {}", display_name))
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
@@ -514,25 +517,25 @@ impl AppState {
                     .num_columns(2)
                     .spacing([10.0, 8.0])
                     .show(ui, |ui| {
-                        ui.label("Хост:");
+                        ui.label("host:");
                         ui.monospace(&display_host);
                         ui.end_row();
 
-                        ui.label("Пользователь:");
+                        ui.label("user:");
                         ui.monospace(&display_user);
                         ui.end_row();
 
-                        ui.label("Пароль:");
+                        ui.label("pass:");
                         let pwd_id = ui.id().with("connect_pwd");
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut self.connect_dialog.password)
                                 .id(pwd_id)
                                 .password(true)
-                                .hint_text("Введите пароль"),
+                                .hint_text("enter password"),
                         );
-                        // Автофокус при открытии диалога
-                        if !resp.has_focus() && self.connect_dialog.password.is_empty() {
+                        if self.dialog_focus_needed {
                             ui.memory_mut(|m| m.request_focus(pwd_id));
+                            self.dialog_focus_needed = false;
                         }
                         if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             do_connect = true;
@@ -545,10 +548,10 @@ impl AppState {
                 ui.add_space(4.0);
 
                 ui.horizontal(|ui| {
-                    if ui.button("🔌 Подключить").clicked() {
+                    if ui.button("[connect]").clicked() {
                         do_connect = true;
                     }
-                    if ui.button("Отмена").clicked() {
+                    if ui.button("[cancel]").clicked() {
                         self.connect_dialog.password.clear();
                         self.show_connect_dialog = false;
                         self.active_session_id = None;
@@ -602,9 +605,9 @@ impl AppState {
             .collect();
 
         let title = if self.dialog.editing_id.is_some() {
-            "Редактировать сессию"
+            "edit session"
         } else {
-            "Новая сессия"
+            "new session"
         };
 
         let mut open = true;
@@ -622,60 +625,94 @@ impl AppState {
                     .num_columns(2)
                     .spacing([10.0, 8.0])
                     .show(ui, |ui| {
-                        ui.label("Имя:");
-                        ui.add(
+                        ui.label("name:");
+                        let name_id = ui.id().with("session_name");
+                        let name_resp = ui.add(
                             egui::TextEdit::singleline(&mut self.dialog.name)
+                                .id(name_id)
                                 .hint_text("My Server"),
                         );
+                        if self.dialog_focus_needed {
+                            ui.memory_mut(|m| m.request_focus(name_id));
+                            self.dialog_focus_needed = false;
+                        }
+                        if name_resp.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        {
+                            ui.memory_mut(|m| {
+                                m.request_focus(ui.id().with("session_host"));
+                            });
+                        }
                         ui.end_row();
 
-                        ui.label("Хост:");
-                        ui.add(
+                        ui.label("host:");
+                        let host_id = ui.id().with("session_host");
+                        let host_resp = ui.add(
                             egui::TextEdit::singleline(&mut self.dialog.host)
+                                .id(host_id)
                                 .hint_text("192.168.1.100"),
                         );
+                        if host_resp.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        {
+                            ui.memory_mut(|m| {
+                                m.request_focus(ui.id().with("session_port"));
+                            });
+                        }
                         ui.end_row();
 
-                        ui.label("Порт:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.dialog.port).desired_width(60.0),
+                        ui.label("port:");
+                        let port_id = ui.id().with("session_port");
+                        let port_resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.dialog.port)
+                                .id(port_id)
+                                .desired_width(60.0),
                         );
+                        if port_resp.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        {
+                            ui.memory_mut(|m| {
+                                m.request_focus(ui.id().with("session_user"));
+                            });
+                        }
                         ui.end_row();
 
-                        ui.label("Пользователь:");
+                        ui.label("user:");
+                        let user_id = ui.id().with("session_user");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.dialog.username)
+                                .id(user_id)
                                 .hint_text("root"),
                         );
                         ui.end_row();
 
-                        ui.label("Авторизация:");
+                        ui.label("auth:");
                         ui.horizontal(|ui| {
-                            ui.radio_value(&mut self.dialog.auth_choice, 0, "Пароль");
-                            ui.radio_value(&mut self.dialog.auth_choice, 1, "Ключ");
-                            ui.radio_value(&mut self.dialog.auth_choice, 2, "Agent");
+                            ui.radio_value(&mut self.dialog.auth_choice, 0, "password");
+                            ui.radio_value(&mut self.dialog.auth_choice, 1, "key");
+                            ui.radio_value(&mut self.dialog.auth_choice, 2, "agent");
                         });
                         ui.end_row();
 
                         match self.dialog.auth_choice {
                             0 => {
-                                ui.label("Пароль:");
+                                ui.label("pass:");
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.dialog.password)
                                         .password(true)
-                                        .hint_text("опционально"),
+                                        .hint_text("optional"),
                                 );
                                 ui.end_row();
 
                                 ui.label("");
                                 ui.colored_label(
-                                    egui::Color32::from_rgb(139, 233, 253),
-                                    "Если пусто — запросится при подключении",
+                                    crate::theme::GREEN_DIM,
+                                    "// if empty, prompted on connect",
                                 );
                                 ui.end_row();
                             }
                             1 => {
-                                ui.label("Путь к ключу:");
+                                ui.label("key:");
                                 ui.horizontal(|ui| {
                                     ui.add(
                                         egui::TextEdit::singleline(&mut self.dialog.key_path)
@@ -687,16 +724,15 @@ impl AppState {
                             _ => {}
                         }
 
-                        // ── Прокси ──
-                        ui.label("Прокси:");
+                        ui.label("proxy:");
                         ui.horizontal(|ui| {
-                            ui.radio_value(&mut self.dialog.proxy_enabled, false, "Нет");
-                            ui.radio_value(&mut self.dialog.proxy_enabled, true, "SOCKS5");
+                            ui.radio_value(&mut self.dialog.proxy_enabled, false, "none");
+                            ui.radio_value(&mut self.dialog.proxy_enabled, true, "socks5");
                         });
                         ui.end_row();
 
                         if self.dialog.proxy_enabled {
-                            ui.label("Прокси хост:");
+                            ui.label("proxy host:");
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.dialog.proxy_host)
                                     .hint_text("127.0.0.1")
@@ -704,7 +740,7 @@ impl AppState {
                             );
                             ui.end_row();
 
-                            ui.label("Прокси порт:");
+                            ui.label("proxy port:");
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.dialog.proxy_port)
                                     .hint_text("1080")
@@ -716,19 +752,18 @@ impl AppState {
                                 ui.label("");
                                 ui.vertical(|ui| {
                                     ui.colored_label(
-                                        egui::Color32::from_rgb(139, 233, 253),
-                                        "Активные SOCKS5-прокси:",
+                                        crate::theme::GREEN_DIM,
+                                        "// active socks5 proxies:",
                                     );
                                     for (name, host, port) in &active_proxies {
                                         let is_selected =
                                             self.dialog.proxy_host == *host
                                                 && self.dialog.proxy_port == port.to_string();
-                                        let label_text = format!("{}:{} — {}", host, port, name);
-                                        let selected = is_selected;
+                                        let label_text = format!("{}:{} -- {}", host, port, name);
                                         let resp = ui.add(
                                             egui::SelectableLabel::new(
-                                                selected,
-                                                egui::RichText::new(&label_text).size(12.5),
+                                                is_selected,
+                                                egui::RichText::new(&label_text),
                                             ),
                                         );
                                         if resp.clicked() {
@@ -746,27 +781,32 @@ impl AppState {
                 ui.separator();
                 ui.add_space(4.0);
 
-                let mut action = DialogAction::None;
-                ui.horizontal(|ui| {
-                    let can_save = !self.dialog.name.is_empty()
-                        && !self.dialog.host.is_empty()
-                        && !self.dialog.username.is_empty();
+                let can_save = !self.dialog.name.is_empty()
+                    && !self.dialog.host.is_empty()
+                    && !self.dialog.username.is_empty();
 
+                let mut action = DialogAction::None;
+
+                if can_save && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    action = DialogAction::SaveAndConnect;
+                }
+
+                ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(can_save, egui::Button::new("💾 Сохранить"))
+                        .add_enabled(can_save, egui::Button::new("[save]"))
                         .clicked()
                     {
                         action = DialogAction::Save;
                     }
 
                     if ui
-                        .add_enabled(can_save, egui::Button::new("🔌 Сохранить и подключить"))
+                        .add_enabled(can_save, egui::Button::new("[save+connect]"))
                         .clicked()
                     {
                         action = DialogAction::SaveAndConnect;
                     }
 
-                    if ui.button("Отмена").clicked() {
+                    if ui.button("[cancel]").clicked() {
                         self.show_session_dialog = false;
                     }
                 });
@@ -808,8 +848,147 @@ impl AppState {
 }
 
 impl eframe::App for AppState {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.031, 0.031, 0.031, 1.0] // theme::BG as opaque
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Автоотключение мёртвых сессий (exit, обрыв связи и т.д.)
+        // Custom title bar
+        egui::TopBottomPanel::top("titlebar")
+            .exact_height(28.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(crate::theme::BG)
+                    .inner_margin(egui::Margin::symmetric(6.0, 0.0)),
+            )
+            .show(ctx, |ui| {
+                let full_rect = ui.max_rect();
+                let btn_w: f32 = 32.0;
+                let btn_h: f32 = 24.0;
+                let btn_gap: f32 = 2.0;
+                let btn_margin: f32 = 6.0;
+                let buttons_total = btn_w * 3.0 + btn_gap * 2.0 + btn_margin;
+
+                // ── Buttons FIRST so they get interaction priority ──
+                let button_area = egui::Rect::from_min_max(
+                    egui::pos2(full_rect.max.x - buttons_total, full_rect.min.y),
+                    full_rect.max,
+                );
+
+                let mut close_clicked = false;
+                let mut max_clicked = false;
+                let mut min_clicked = false;
+                let mut any_btn_hovered = false;
+
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(button_area), |ui| {
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = btn_gap;
+
+                            let close = ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new(" x ")
+                                        .monospace()
+                                        .size(14.0),
+                                )
+                                .min_size(egui::vec2(btn_w, btn_h)),
+                            );
+                            close_clicked = close.clicked();
+                            any_btn_hovered |= close.hovered();
+
+                            let maximize = ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new(" o ")
+                                        .monospace()
+                                        .size(14.0),
+                                )
+                                .min_size(egui::vec2(btn_w, btn_h)),
+                            );
+                            max_clicked = maximize.clicked();
+                            any_btn_hovered |= maximize.hovered();
+
+                            let minimize = ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new(" _ ")
+                                        .monospace()
+                                        .size(14.0),
+                                )
+                                .min_size(egui::vec2(btn_w, btn_h)),
+                            );
+                            min_clicked = minimize.clicked();
+                            any_btn_hovered |= minimize.hovered();
+                        },
+                    );
+                });
+
+                if close_clicked {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                if max_clicked {
+                    let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                }
+                if min_clicked {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
+
+                // ── Title text ──
+                ui.painter().text(
+                    egui::pos2(full_rect.min.x + 8.0, full_rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    "SSHerald",
+                    egui::FontId::monospace(13.0),
+                    crate::theme::GREEN_DIM,
+                );
+
+                // ── Drag zone — only when no button is hovered ──
+                let drag_rect = egui::Rect::from_min_max(
+                    full_rect.min,
+                    egui::pos2(full_rect.max.x - buttons_total - 4.0, full_rect.max.y),
+                );
+                let drag_resp = ui.interact(
+                    drag_rect,
+                    ui.id().with("titlebar_drag"),
+                    egui::Sense::click_and_drag(),
+                );
+                if drag_resp.drag_started() && !any_btn_hovered {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+                if drag_resp.double_clicked() {
+                    let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                }
+
+                // ── Bottom separator ──
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(full_rect.min.x, full_rect.max.y),
+                        egui::pos2(full_rect.max.x, full_rect.max.y),
+                    ],
+                    egui::Stroke::new(1.0, crate::theme::GREEN_DARK),
+                );
+            });
+
+        // Bottom border line
+        egui::TopBottomPanel::bottom("bottom_border")
+            .exact_height(1.0)
+            .frame(egui::Frame::none().fill(crate::theme::GREEN_DARK))
+            .show(ctx, |_| {});
+
+        // Paint side borders on foreground layer
+        let screen = ctx.screen_rect();
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("window_border"),
+        ));
+        painter.rect_stroke(
+            screen,
+            0.0,
+            egui::Stroke::new(1.0, crate::theme::GREEN_DARK),
+        );
+
+        // Dead session cleanup
         let dead_ids: Vec<String> = self
             .connections
             .iter()
@@ -818,7 +997,6 @@ impl eframe::App for AppState {
             .collect();
 
         for id in &dead_ids {
-            // Сохраняем ошибку до удаления соединения
             let error = self.connections.get(id).and_then(|conn| {
                 conn.ssh.take_error().or_else(|| conn.error.clone())
             });
@@ -833,7 +1011,6 @@ impl eframe::App for AppState {
         self.render_session_dialog(ctx);
         self.render_connect_dialog(ctx);
 
-        // Периодическая перерисовка (~60 FPS) при наличии активных соединений
         if !self.connections.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
