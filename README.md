@@ -6,18 +6,18 @@
 |____/|____/|_| |_|\___|_|  \__,_|_|\__,_|
 ```
 
-===================================================================
+=
                             ABOUT
-===================================================================
+=
 
   Multi-session SSH/SFTP client written in Rust.
   Terminal, file manager, port forwarding -- all in one window.
   Pure Rust SSH stack (russh + ring). No OpenSSL, no C deps.
   Single binary, zero installation.
 
-===================================================================
+=
                             BUILD
-===================================================================
+=
 
   Install dependencies (Debian/Ubuntu/Fedora/Arch):
 
@@ -42,9 +42,9 @@
 
     $ cargo build --release
 
-===================================================================
+=
                            CONFIG
-===================================================================
+=
 
   Session profiles are stored in:
 
