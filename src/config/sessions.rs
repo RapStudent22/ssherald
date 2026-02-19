@@ -68,6 +68,7 @@ pub fn load_sessions() -> Vec<SessionConfig> {
                 username: s.username,
                 auth_type,
                 proxy,
+                key_passphrase: None,
             }
         })
         .collect()

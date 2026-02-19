@@ -74,9 +74,17 @@ impl Default for SessionDialog {
     }
 }
 
+#[derive(PartialEq, Clone, Copy)]
+enum ConnectAuthMode {
+    Password,
+    KeyPassphrase,
+}
+
 struct ConnectDialog {
     session_id: String,
     password: String,
+    key_passphrase: String,
+    auth_mode: ConnectAuthMode,
 }
 
 impl Default for ConnectDialog {
@@ -84,6 +92,8 @@ impl Default for ConnectDialog {
         ConnectDialog {
             session_id: String::new(),
             password: String::new(),
+            key_passphrase: String::new(),
+            auth_mode: ConnectAuthMode::Password,
         }
     }
 }
@@ -133,7 +143,7 @@ impl AppState {
         }
     }
 
-    /// Инициировать подключение: для пароля — показать диалог, для ключа/агента — сразу.
+    /// Инициировать подключение: для пароля/ключа — показать диалог, для агента — сразу.
     fn try_connect(&mut self, session_id: &str) {
         let session = match self.sessions.iter().find(|s| s.id == session_id).cloned() {
             Some(s) => s,
@@ -147,12 +157,25 @@ impl AppState {
                 self.connect_dialog = ConnectDialog {
                     session_id: session.id.clone(),
                     password: String::new(),
+                    key_passphrase: String::new(),
+                    auth_mode: ConnectAuthMode::Password,
                 };
                 self.show_connect_dialog = true;
                 self.dialog_focus_needed = true;
                 self.active_session_id = Some(session.id.clone());
             }
-            AuthType::KeyFile(_) | AuthType::Agent => {
+            AuthType::KeyFile(_) => {
+                self.connect_dialog = ConnectDialog {
+                    session_id: session.id.clone(),
+                    password: String::new(),
+                    key_passphrase: String::new(),
+                    auth_mode: ConnectAuthMode::KeyPassphrase,
+                };
+                self.show_connect_dialog = true;
+                self.dialog_focus_needed = true;
+                self.active_session_id = Some(session.id.clone());
+            }
+            AuthType::Agent => {
                 self.connect_session(&session);
             }
         }
@@ -193,6 +216,7 @@ impl AppState {
                 username: self.dialog.username.clone(),
                 auth_type,
                 proxy,
+                key_passphrase: None,
             };
             self.sessions.push(session);
         }
@@ -499,6 +523,7 @@ impl AppState {
         let display_name = session.name.clone();
         let display_host = format!("{}:{}", session.host, session.port);
         let display_user = session.username.clone();
+        let auth_mode = self.connect_dialog.auth_mode;
 
         let mut open = true;
         let mut do_connect = false;
@@ -507,9 +532,9 @@ impl AppState {
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
-            .default_width(350.0)
+            .default_width(380.0)
             .default_pos(egui::pos2(
-                ctx.screen_rect().center().x - 175.0,
+                ctx.screen_rect().center().x - 190.0,
                 ctx.screen_rect().center().y - 80.0,
             ))
             .show(ctx, |ui| {
@@ -525,22 +550,58 @@ impl AppState {
                         ui.monospace(&display_user);
                         ui.end_row();
 
-                        ui.label("pass:");
-                        let pwd_id = ui.id().with("connect_pwd");
-                        let resp = ui.add(
-                            egui::TextEdit::singleline(&mut self.connect_dialog.password)
-                                .id(pwd_id)
-                                .password(true)
-                                .hint_text("enter password"),
-                        );
-                        if self.dialog_focus_needed {
-                            ui.memory_mut(|m| m.request_focus(pwd_id));
-                            self.dialog_focus_needed = false;
+                        match auth_mode {
+                            ConnectAuthMode::Password => {
+                                ui.label("pass:");
+                                let pwd_id = ui.id().with("connect_pwd");
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(
+                                        &mut self.connect_dialog.password,
+                                    )
+                                    .id(pwd_id)
+                                    .password(true)
+                                    .hint_text("enter password"),
+                                );
+                                if self.dialog_focus_needed {
+                                    ui.memory_mut(|m| m.request_focus(pwd_id));
+                                    self.dialog_focus_needed = false;
+                                }
+                                if resp.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                {
+                                    do_connect = true;
+                                }
+                                ui.end_row();
+                            }
+                            ConnectAuthMode::KeyPassphrase => {
+                                if let AuthType::KeyFile(path) = &session.auth_type {
+                                    ui.label("key:");
+                                    ui.monospace(path.as_str());
+                                    ui.end_row();
+                                }
+
+                                ui.label("passphrase:");
+                                let pp_id = ui.id().with("connect_passphrase");
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(
+                                        &mut self.connect_dialog.key_passphrase,
+                                    )
+                                    .id(pp_id)
+                                    .password(true)
+                                    .hint_text("empty if unencrypted"),
+                                );
+                                if self.dialog_focus_needed {
+                                    ui.memory_mut(|m| m.request_focus(pp_id));
+                                    self.dialog_focus_needed = false;
+                                }
+                                if resp.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                {
+                                    do_connect = true;
+                                }
+                                ui.end_row();
+                            }
                         }
-                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            do_connect = true;
-                        }
-                        ui.end_row();
                     });
 
                 ui.add_space(4.0);
@@ -552,23 +613,37 @@ impl AppState {
                         do_connect = true;
                     }
                     if ui.button("[cancel]").clicked() {
-                        self.connect_dialog.password.clear();
+                        self.connect_dialog = ConnectDialog::default();
                         self.show_connect_dialog = false;
                         self.active_session_id = None;
                     }
                 });
             });
 
-        if do_connect && !self.connect_dialog.password.is_empty() {
+        if do_connect {
             let mut config = session;
-            config.auth_type = AuthType::Password(self.connect_dialog.password.clone());
-            self.connect_session(&config);
-            self.connect_dialog.password.clear();
-            self.show_connect_dialog = false;
+            match auth_mode {
+                ConnectAuthMode::Password => {
+                    if !self.connect_dialog.password.is_empty() {
+                        config.auth_type =
+                            AuthType::Password(self.connect_dialog.password.clone());
+                        self.connect_session(&config);
+                        self.connect_dialog = ConnectDialog::default();
+                        self.show_connect_dialog = false;
+                    }
+                }
+                ConnectAuthMode::KeyPassphrase => {
+                    let pp = self.connect_dialog.key_passphrase.clone();
+                    config.key_passphrase = if pp.is_empty() { None } else { Some(pp) };
+                    self.connect_session(&config);
+                    self.connect_dialog = ConnectDialog::default();
+                    self.show_connect_dialog = false;
+                }
+            }
         }
 
         if !open {
-            self.connect_dialog.password.clear();
+            self.connect_dialog = ConnectDialog::default();
             self.show_connect_dialog = false;
             self.active_session_id = None;
         }

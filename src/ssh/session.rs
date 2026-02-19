@@ -23,6 +23,8 @@ pub struct SessionConfig {
     pub auth_type: AuthType,
     #[serde(default)]
     pub proxy: Option<ProxyConfig>,
+    #[serde(skip)]
+    pub key_passphrase: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -248,27 +250,78 @@ pub async fn create_russh_session(
                 .authenticate_password(&config.username, pwd)
                 .await?;
             if !matches!(auth, client::AuthResult::Success) {
-                return Err("Аутентификация не удалась".into());
+                return Err("Authentication failed".into());
             }
         }
         AuthType::KeyFile(path) => {
             let expanded = expand_tilde(path);
-            let key = keys::load_secret_key(&expanded, None)
-                .map_err(|e| format!("Ошибка загрузки ключа {}: {}", expanded, e))?;
-            let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+            let passphrase = config.key_passphrase.as_deref();
+            let key = keys::load_secret_key(&expanded, passphrase)
+                .map_err(|e| format!("Key load error {}: {}", expanded, e))?;
+            let hash_alg = best_rsa_hash(&session).await;
+            let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg);
             let auth = session
                 .authenticate_publickey(&config.username, key_with_alg)
                 .await?;
             if !matches!(auth, client::AuthResult::Success) {
-                return Err("Аутентификация по ключу не удалась".into());
+                return Err("Public key authentication failed".into());
             }
         }
         AuthType::Agent => {
-            return Err("SSH Agent пока не поддерживается (будет добавлено позже)".into());
+            auth_with_agent(&mut session, &config.username).await?;
         }
     }
 
     Ok(session)
+}
+
+// ── Helper: negotiate best RSA hash with the server ──
+
+async fn best_rsa_hash(
+    session: &client::Handle<SshHandler>,
+) -> Option<keys::HashAlg> {
+    session
+        .best_supported_rsa_hash()
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+}
+
+// ── SSH Agent authentication ──
+
+async fn auth_with_agent(
+    session: &mut client::Handle<SshHandler>,
+    username: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use keys::agent::client::AgentClient;
+
+    let mut agent = AgentClient::connect_env().await.map_err(|e| {
+        format!("Cannot connect to SSH agent (SSH_AUTH_SOCK): {}", e)
+    })?;
+
+    let identities = agent.request_identities().await.map_err(|e| {
+        format!("Failed to list agent keys: {}", e)
+    })?;
+
+    if identities.is_empty() {
+        return Err("SSH agent has no keys loaded".into());
+    }
+
+    let hash_alg = best_rsa_hash(session).await;
+
+    for pubkey in &identities {
+        let result = session
+            .authenticate_publickey_with(username, pubkey.clone(), hash_alg, &mut agent)
+            .await;
+        match result {
+            Ok(client::AuthResult::Success) => return Ok(()),
+            Ok(_) => continue,
+            Err(_) => continue,
+        }
+    }
+
+    Err("None of the agent keys were accepted by the server".into())
 }
 
 // ── Вспомогательные функции ──
