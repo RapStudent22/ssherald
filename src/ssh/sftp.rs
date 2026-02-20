@@ -699,32 +699,49 @@ async fn download_chunked(
     local: &str,
     progress: &TransferState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let mut remote_file = sftp.open(remote).await?;
+    let mut remote_file = sftp
+        .open(remote)
+        .await
+        .map_err(|e| format!("open remote '{}': {}", remote, e))?;
 
-    // Get actual file size if we didn't know it
     if progress.total.load(Ordering::Relaxed) == 0 {
-        if let Ok(meta) = sftp.metadata(remote).await {
+        if let Ok(meta) = remote_file.metadata().await {
             progress.total.store(meta.len(), Ordering::Relaxed);
         }
     }
 
-    let mut local_file = tokio::fs::File::create(local).await?;
+    // Ensure the local parent directory exists
+    if let Some(parent) = std::path::Path::new(local).parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("create local dir '{}': {}", parent.display(), e))?;
+    }
+
+    let mut local_file = tokio::fs::File::create(local)
+        .await
+        .map_err(|e| format!("create local file '{}': {}", local, e))?;
+
     let mut buf = vec![0u8; CHUNK_SIZE];
     let mut total_read: u64 = 0;
 
     loop {
-        let n = remote_file.read(&mut buf).await?;
+        let n = remote_file
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("read remote '{}' at offset {}: {}", remote, total_read, e))?;
         if n == 0 {
             break;
         }
-        tokio::io::AsyncWriteExt::write_all(&mut local_file, &buf[..n]).await?;
+        local_file.write_all(&buf[..n]).await?;
         total_read += n as u64;
         progress.transferred.store(total_read, Ordering::Relaxed);
     }
 
-    tokio::io::AsyncWriteExt::flush(&mut local_file).await?;
+    local_file.flush().await?;
+    // Explicitly close the remote SFTP file handle
+    remote_file.shutdown().await.ok();
     Ok(())
 }
 
@@ -736,12 +753,18 @@ async fn upload_chunked(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let mut local_file = tokio::fs::File::open(local).await?;
+    let mut local_file = tokio::fs::File::open(local)
+        .await
+        .map_err(|e| format!("open local '{}': {}", local, e))?;
     let meta = local_file.metadata().await?;
     let file_size = meta.len();
     progress.total.store(file_size, Ordering::Relaxed);
 
-    let mut remote_file = sftp.create(remote).await?;
+    let mut remote_file = sftp
+        .create(remote)
+        .await
+        .map_err(|e| format!("create remote '{}': {}", remote, e))?;
+
     let mut buf = vec![0u8; CHUNK_SIZE];
     let mut total_written: u64 = 0;
 
@@ -750,7 +773,10 @@ async fn upload_chunked(
         if n == 0 {
             break;
         }
-        remote_file.write_all(&buf[..n]).await?;
+        remote_file
+            .write_all(&buf[..n])
+            .await
+            .map_err(|e| format!("write remote '{}' at offset {}: {}", remote, total_written, e))?;
         total_written += n as u64;
         progress.transferred.store(total_written, Ordering::Relaxed);
     }
