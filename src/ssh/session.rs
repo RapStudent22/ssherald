@@ -290,16 +290,44 @@ async fn best_rsa_hash(
 
 // ── SSH Agent authentication ──
 
+#[cfg(unix)]
 async fn auth_with_agent(
     session: &mut client::Handle<SshHandler>,
     username: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use keys::agent::client::AgentClient;
-
-    let mut agent = AgentClient::connect_env().await.map_err(|e| {
+    let mut agent = keys::agent::client::AgentClient::connect_env().await.map_err(|e| {
         format!("Cannot connect to SSH agent (SSH_AUTH_SOCK): {}", e)
     })?;
+    auth_with_agent_inner(session, username, &mut agent).await
+}
 
+#[cfg(windows)]
+async fn auth_with_agent(
+    session: &mut client::Handle<SshHandler>,
+    username: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut agent = keys::agent::client::AgentClient::connect_pageant().await.map_err(|e| {
+        format!("Cannot connect to Pageant SSH agent: {}", e)
+    })?;
+    auth_with_agent_inner(session, username, &mut agent).await
+}
+
+#[cfg(not(any(unix, windows)))]
+async fn auth_with_agent(
+    _session: &mut client::Handle<SshHandler>,
+    _username: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    Err("SSH agent is not supported on this platform".into())
+}
+
+async fn auth_with_agent_inner<S>(
+    session: &mut client::Handle<SshHandler>,
+    username: &str,
+    agent: &mut keys::agent::client::AgentClient<S>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: keys::agent::client::AgentStream + Unpin + Send + 'static,
+{
     let identities = agent.request_identities().await.map_err(|e| {
         format!("Failed to list agent keys: {}", e)
     })?;
@@ -312,7 +340,7 @@ async fn auth_with_agent(
 
     for pubkey in &identities {
         let result = session
-            .authenticate_publickey_with(username, pubkey.clone(), hash_alg, &mut agent)
+            .authenticate_publickey_with(username, pubkey.clone(), hash_alg, agent)
             .await;
         match result {
             Ok(client::AuthResult::Success) => return Ok(()),
